@@ -5,130 +5,137 @@ import numpy as np
 
 def create_ecommerce_features(df):
     """
-    Engineers new features for the e-commerce fraud dataset.
-    - Time-based features (hour_of_day, day_of_week, day_of_year).
-    - time_since_signup.
-    - Transaction frequency/velocity features (simple counts for now).
+    Performs feature engineering for the e-commerce transaction dataset.
+
+    Args:
+        df (pd.DataFrame): The input e-commerce DataFrame.
+            Expected to have 'event_timestamp' as datetime.
+
+    Returns:
+        pd.DataFrame: The DataFrame with new engineered features.
     """
-    print("Starting feature engineering for e-commerce data...")
+    print("--- Starting Feature Engineering for E-commerce Data ---")
 
-    # Ensure time columns are datetime objects before feature extraction
-    if not pd.api.types.is_datetime64_any_dtype(df['purchase_time']):
-        df['purchase_time'] = pd.to_datetime(df['purchase_time'])
-    if not pd.api.types.is_datetime64_any_dtype(df['signup_time']):
-        df['signup_time'] = pd.to_datetime(df['signup_time'])
+    # Time-based Features (ensure 'event_timestamp' is datetime)
+    if not pd.api.types.is_datetime64_any_dtype(df['event_timestamp']):
+        df['event_timestamp'] = pd.to_datetime(df['event_timestamp'], errors='coerce')
+        df.dropna(subset=['event_timestamp'], inplace=True) # Drop rows where conversion failed
 
-    # Time-Based features
-    df['hour_of_day'] = df['purchase_time'].dt.hour
-    df['day_of_week'] = df['purchase_time'].dt.dayofweek # Monday=0, Sunday=6
-    df['day_of_year'] = df['purchase_time'].dt.dayofyear # For seasonality detection
-    print("Created 'hour_of_day', 'day_of_week', 'day_of_year'.")
+    df['hour_of_day'] = df['event_timestamp'].dt.hour.astype('category')
+    df['day_of_week'] = df['event_timestamp'].dt.dayofweek.astype('category') # Monday=0, Sunday=6
+    df['month'] = df['event_timestamp'].dt.month.astype('category')
+    df['day_of_month'] = df['event_timestamp'].dt.day.astype('category')
 
-    # time_since_signup
-    df['time_since_signup_hours'] = (df['purchase_time'] - df['signup_time']).dt.total_seconds() / 3600
-    # Handle negative values (if purchase_time < signup_time due to data errors)
-    df['time_since_signup_hours'] = df['time_since_signup_hours'].apply(lambda x: max(0, x))
-    print("Created 'time_since_signup_hours'.")
+    # Convert original `user_id`, `product_id`, etc., to category for potential one-hot encoding
+    df['user_id'] = df['user_id'].astype('category')
+    df['product_id'] = df['product_id'].astype('category')
+    df['category_id'] = df['category_id'].astype('category')
+    df['brand'] = df['brand'].astype('category')
+    df['event_type'] = df['event_type'].astype('category')
 
-    # Transaction frequency and velocity (simpler aggregations)
-    # These typically rely on previous transactions, so ensure data is sorted by time if needed.
-    # For global counts, sort is not strictly necessary.
 
-    # Number of transactions per user_id, device_id, ip_address
-    df['user_transaction_count'] = df.groupby('user_id')['purchase_time'].transform('count')
-    df['device_transaction_count'] = df.groupby('device_id')['purchase_time'].transform('count')
-    df['ip_transaction_count'] = df.groupby('ip_address')['purchase_time'].transform('count')
-    print("Created transaction count features for user, device, and IP.")
+    # Transaction-based Features
+    # Sort by user and time for sequential features
+    df = df.sort_values(by=['user_id', 'event_timestamp'])
 
-    # Number of unique devices/IPs used by a user
-    df['user_unique_devices'] = df.groupby('user_id')['device_id'].transform('nunique')
-    df['user_unique_ips'] = df.groupby('user_id')['ip_address'].transform('nunique')
-    print("Created user's unique device/IP count features.")
+    # Time since last transaction for each user (in seconds)
+    df['time_since_last_transaction'] = df.groupby('user_id')['event_timestamp'].diff().dt.total_seconds().fillna(0)
 
-    # Number of unique users per device/IP (indicates shared resources)
-    df['device_unique_users'] = df.groupby('device_id')['user_id'].transform('nunique')
-    df['ip_unique_users'] = df.groupby('ip_address')['user_id'].transform('nunique')
-    print("Created device/IP's unique user count features.")
+    # Count of transactions per user
+    df['user_transaction_count'] = df.groupby('user_id').cumcount() + 1
 
-    # Convert newly created time features to category if they have few unique values,
-    # or keep as numerical if they act as a continuous signal.
-    # For hour_of_day and day_of_week, often treated as categorical or binned.
-    df['hour_of_day'] = df['hour_of_day'].astype('category')
-    df['day_of_week'] = df['day_of_week'].astype('category')
+    # Average price per user (cumulative average up to current transaction)
+    df['user_avg_price'] = df.groupby('user_id')['price'].expanding().mean().reset_index(level=0, drop=True)
+    df['user_avg_price'].fillna(df['price'], inplace=True) # For the first transaction
 
-    print("E-commerce feature engineering complete.")
+    # Indicate if it's the first transaction for a user in the dataset
+    df['is_first_transaction'] = (df['user_transaction_count'] == 1).astype(int)
+
+
+    print("--- E-commerce Feature Engineering Complete ---")
     return df
 
 def create_bank_features(df):
     """
-    Engineers new features for the bank transaction dataset.
-    - Time-based features (hour_of_day, day_of_week) from 'Time' column.
+    Performs feature engineering for the bank transaction (credit card fraud) dataset.
+
+    Args:
+        df (pd.DataFrame): The input bank transaction DataFrame.
+        This DF is expected to have 'Time' and 'Amount' features along with V1-V28 PCA features.
+
+    Returns:
+        pd.DataFrame: The DataFrame with new engineered features.
     """
-    print("Starting feature engineering for bank data...")
+    print("--- Starting Feature Engineering for Bank Data ---")
 
-    # Ensure 'Time' is numerical before conversion
-    if not pd.api.types.is_numeric_dtype(df['Time']):
-        df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
+    # The 'Time' column in this dataset is seconds elapsed since the first transaction.
+    # We will derive cyclical time features from it.
 
-    # Convert 'Time' (seconds from first transaction) to cyclical features
-    # Assuming a 24-hour cycle for 'hour_of_day' and a 7-day cycle for 'day_of_week'.
-    # Max time in dataset is ~172792 seconds, which is ~48 hours.
-    # hour_of_day will wrap around every 24 hours.
-    df['hour_of_day'] = (df['Time'] % (24 * 3600)) / 3600
-    df['day_of_week'] = (df['Time'] // (24 * 3600)) % 7 # Simple day counter, wraps every 7 days
+    # Calculate hour of day (0-23)
+    # Convert seconds to hours, take integer part (floor), then modulo 24
+    df['hour_of_day'] = (df['Time'] / 3600).astype(int) % 24
+    df['hour_of_day'] = df['hour_of_day'].astype('category') # Convert to category type
 
-    # Convert newly created time features to category if they have few unique values,
-    # or keep as numerical. For these, they might be more useful as categorical.
-    df['hour_of_day'] = df['hour_of_day'].astype('category')
-    df['day_of_week'] = df['day_of_week'].astype('category')
 
-    print("Created 'hour_of_day' and 'day_of_week' for bank data.")
-    print("Bank feature engineering complete.")
+    # Calculate day of week (0-6, assuming dataset starts on day 0)
+    # Convert seconds to days, take integer part (floor), then modulo 7
+    df['day_of_week'] = (df['Time'] / (3600 * 24)).astype(int) % 7
+    df['day_of_week'] = df['day_of_week'].astype('category') # Convert to category type
+
+
+    # Interaction features: Amount related to time
+    # This can be tricky due to the nature of the 'Time' column in this dataset.
+    # 'Amount_per_hour' or 'Amount_per_day' might be less intuitive since 'Time' is continuous seconds.
+    # Instead, consider ratios of Amount to other features (e.g., mean, max) or transformations.
+    # For now, let's keep it simple with just hour_of_day and day_of_week to avoid high cardinality issues.
+    # You could add things like:
+    # df['Amount_log'] = np.log1p(df['Amount']) # Log transform for skewed Amount
+    # df['Amount_per_V_feature'] = df['Amount'] / (df['V_feature'].abs() + 1e-6) # Example: amount / V1.abs()
+
+    print("--- Bank Feature Engineering Complete ---")
     return df
 
 if __name__ == '__main__':
-    # Example usage (for testing this module directly)
-    print("--- Testing feature_engineering.py ---")
+    # This block is for testing the functions directly
+    print("Running feature_engineering.py as a standalone script for testing.")
 
-    # Dummy E-commerce Data for testing
+    # --- Test E-commerce Features ---
+    print("\nTesting E-commerce Feature Engineering...")
     ecommerce_data = {
-        'user_id': [1, 1, 2, 3, 4],
-        'signup_time': ['2023-01-01 10:00:00', '2023-01-01 10:00:00', '2023-01-02 11:00:00', '2023-01-03 12:00:00', '2023-01-04 13:00:00'],
-        'purchase_time': ['2023-01-01 10:30:00', '2023-01-01 10:45:00', '2023-01-02 11:30:00', '2023-01-03 12:30:00', '2023-01-04 13:30:00'],
-        'purchase_value': [50, 60, 100, 20, 75],
-        'device_id': ['A', 'A', 'B', 'C', 'D'],
-        'source': ['SEO', 'Ads', 'Ads', 'Direct', 'SEO'],
-        'browser': ['Chrome', 'Safari', 'Safari', 'Firefox', 'Edge'],
-        'sex': ['M', 'M', 'F', 'M', 'F'],
-        'age': [30, 30, 25, 40, 35],
-        'ip_address': ['192.168.1.1', '192.168.1.1', '192.168.1.2', '192.168.1.3', '192.168.1.4'],
-        'class': [0, 0, 1, 0, 0]
+        'event_timestamp': ['2023-01-01 10:00:00', '2023-01-01 10:30:00', '2023-01-02 15:00:00', '2023-01-02 15:10:00', '2023-01-01 11:00:00'],
+        'event_type': ['view', 'purchase', 'view', 'purchase', 'view'],
+        'product_id': [1, 2, 1, 3, 4],
+        'category_id': [10, 10, 20, 20, 10],
+        'brand': ['brandA', 'brandB', 'brandA', 'brandC', 'brandA'],
+        'price': [10.0, 20.0, 15.0, 25.0, 12.0],
+        'user_id': [101, 101, 102, 102, 101]
     }
-    df_eco_test = pd.DataFrame(ecommerce_data)
-    df_eco_test['signup_time'] = pd.to_datetime(df_eco_test['signup_time'])
-    df_eco_test['purchase_time'] = pd.to_datetime(df_eco_test['purchase_time'])
-    print("\nOriginal E-commerce Test Data:")
-    print(df_eco_test)
-
-    df_eco_engineered = create_ecommerce_features(df_eco_test.copy())
-    print("\nE-commerce Data after Feature Engineering:")
-    print(df_eco_engineered.head())
-    print(df_eco_engineered[['purchase_time', 'signup_time', 'hour_of_day', 'day_of_week', 'time_since_signup_hours',
-                            'user_transaction_count', 'device_unique_users']].head())
+    df_ecommerce_test = pd.DataFrame(ecommerce_data)
+    df_ecommerce_test_engineered = create_ecommerce_features(df_ecommerce_test.copy())
+    print(df_ecommerce_test_engineered.head(5))
+    print("\nE-commerce Feature Dtypes:")
+    print(df_ecommerce_test_engineered[['hour_of_day', 'day_of_week', 'month', 'day_of_month',
+                                       'user_id', 'product_id', 'category_id', 'brand', 'event_type',
+                                       'time_since_last_transaction', 'user_transaction_count', 'user_avg_price', 'is_first_transaction']].dtypes)
+    print("\nE-commerce hour_of_day unique values:", df_ecommerce_test_engineered['hour_of_day'].nunique())
+    print("E-commerce day_of_week unique values:", df_ecommerce_test_engineered['day_of_week'].nunique())
 
 
-    # Dummy Bank Data for testing
+    # --- Test Bank Features ---
+    print("\nTesting Bank Feature Engineering...")
+    # Create a dummy bank dataset mimicking the structure of creditcard.csv
     bank_data = {
-        'Time': [0, 3600, 86400, 90000, 172800], # 0s, 1hr, 24hr, 25hr, 48hr
-        'V1': [1, 2, 3, 4, 5],
-        'Amount': [10, 20, 30, 40, 50],
-        'Class': [0, 0, 1, 0, 0]
+        'Time': [0.0, 1.0, 3600.0, 3601.0, 86399.0, 86400.0, 172800.0, 172801.0],
+        'V1': np.random.rand(8), 'V2': np.random.rand(8), 'V3': np.random.rand(8),
+        'Amount': [10.0, 20.0, 15.0, 25.0, 30.0, 50.0, 100.0, 120.0],
+        'Class': [0, 0, 0, 0, 0, 1, 0, 0]
     }
     df_bank_test = pd.DataFrame(bank_data)
-    print("\nOriginal Bank Test Data:")
-    print(df_bank_test)
-
-    df_bank_engineered = create_bank_features(df_bank_test.copy())
-    print("\nBank Data after Feature Engineering:")
-    print(df_bank_engineered.head())
-    print(df_bank_engineered[['Time', 'hour_of_day', 'day_of_week']].head())
+    df_bank_test_engineered = create_bank_features(df_bank_test.copy())
+    print(df_bank_test_engineered.head(8)) # Print all 8 rows to see changes
+    print("\nBank Feature Dtypes:")
+    print(df_bank_test_engineered[['hour_of_day', 'day_of_week']].dtypes)
+    print("\nBank hour_of_day unique values:", df_bank_test_engineered['hour_of_day'].nunique())
+    print("Bank day_of_week unique values:", df_bank_test_engineered['day_of_week'].nunique())
+    print("\nBank hour_of_day values:", df_bank_test_engineered['hour_of_day'].unique())
+    print("Bank day_of_week values:", df_bank_test_engineered['day_of_week'].unique())

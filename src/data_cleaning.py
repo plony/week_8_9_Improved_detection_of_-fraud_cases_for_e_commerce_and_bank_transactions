@@ -5,110 +5,127 @@ import numpy as np
 
 def clean_ecommerce_data(df):
     """
-    Performs initial data cleaning for the e-commerce fraud dataset.
-    - Removes duplicate rows.
-    - Corrects data types for time columns.
-    - Converts specified categorical columns to 'category' dtype.
+    Performs basic cleaning on the e-commerce transaction dataset.
+    - Handles missing values (simple imputation or dropping).
+    - Ensures correct data types.
+
+    Args:
+        df (pd.DataFrame): The input e-commerce DataFrame.
+
+    Returns:
+        pd.DataFrame: The cleaned DataFrame.
     """
-    print("Starting e-commerce data cleaning...")
+    print("--- Starting Cleaning for E-commerce Data ---")
 
-    # Remove duplicates
-    initial_rows = len(df)
-    df.drop_duplicates(inplace=True)
-    print(f"Removed {initial_rows - len(df)} duplicate rows.")
+    # Convert 'event_timestamp' to datetime, coerce errors to NaT
+    df['event_timestamp'] = pd.to_datetime(df['event_timestamp'], errors='coerce')
 
-    # Correct data types for time
-    df['signup_time'] = pd.to_datetime(df['signup_time'])
-    df['purchase_time'] = pd.to_datetime(df['purchase_time'])
-    print("Converted 'signup_time' and 'purchase_time' to datetime objects.")
+    # Drop rows where 'event_timestamp' is NaT (if conversion failed)
+    df.dropna(subset=['event_timestamp'], inplace=True)
 
-    # Convert specified categorical columns to 'category' dtype
-    categorical_cols = ['source', 'browser', 'sex']
-    for col in categorical_cols:
+    # Handle missing 'brand' - fill with 'unknown'
+    df['brand'].fillna('unknown', inplace=True)
+
+    # Handle missing 'price' - fill with median or mean, or drop rows
+    # For simplicity, let's fill with median
+    if 'price' in df.columns and df['price'].isnull().any():
+        median_price = df['price'].median()
+        df['price'].fillna(median_price, inplace=True)
+        print(f"Filled missing 'price' values with median: {median_price}")
+
+    # Ensure numerical columns are numeric, coerce errors
+    for col in ['price']: # Add other numerical columns if any
         if col in df.columns:
-            df[col] = df[col].astype('category')
-    print(f"Converted {', '.join(categorical_cols)} to 'category' type.")
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            # Drop rows with NaN if coercion failed for critical numerical columns
+            df.dropna(subset=[col], inplace=True)
 
-    # Ensure target variable is int8
-    if 'class' in df.columns:
-        df['class'] = df['class'].astype('int8')
 
-    print("E-commerce data cleaning complete.")
+    # Drop duplicate rows based on all columns or a subset of key columns
+    initial_rows = df.shape[0]
+    df.drop_duplicates(inplace=True)
+    if df.shape[0] < initial_rows:
+        print(f"Dropped {initial_rows - df.shape[0]} duplicate rows.")
+
+    print("--- E-commerce Data Cleaning Complete ---")
     return df
 
 def clean_bank_data(df):
     """
-    Performs initial data cleaning for the bank transaction fraud dataset.
-    - Removes duplicate rows.
-    (Other cleaning steps like type conversion are less critical for this dataset
-    as features are mostly numerical and pre-processed).
+    Performs basic cleaning on the bank transaction (credit card fraud) dataset.
+    - Handles missing values (if any, though creditcard.csv is typically clean).
+    - Ensures correct data types.
+
+    Args:
+        df (pd.DataFrame): The input bank transaction DataFrame.
+
+    Returns:
+        pd.DataFrame: The cleaned DataFrame.
     """
-    print("Starting bank data cleaning...")
+    print("--- Starting Cleaning for Bank Data ---")
 
-    # Remove duplicates
-    initial_rows = len(df)
+    # The credit card fraud dataset (creditcard.csv) is usually very clean with no NaNs.
+    # We'll include a check here for robustness, but it's unlikely to find any.
+    if df.isnull().any().any():
+        print("Warning: Missing values found in bank data. Handling by dropping rows.")
+        initial_rows = df.shape[0]
+        df.dropna(inplace=True)
+        if df.shape[0] < initial_rows:
+            print(f"Dropped {initial_rows - df.shape[0]} rows with missing values.")
+
+    # Ensure 'Time' and 'Amount' are float64, 'Class' is int64
+    df['Time'] = pd.to_numeric(df['Time'], errors='coerce')
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+    df['Class'] = pd.to_numeric(df['Class'], errors='coerce').astype(int) # Class should be 0 or 1
+
+    # Drop rows where conversion failed for critical columns (should not happen with this dataset)
+    df.dropna(subset=['Time', 'Amount', 'Class'], inplace=True)
+
+
+    # Drop duplicate rows based on all columns
+    initial_rows = df.shape[0]
     df.drop_duplicates(inplace=True)
-    print(f"Removed {initial_rows - len(df)} duplicate rows.")
+    if df.shape[0] < initial_rows:
+        print(f"Dropped {initial_rows - df.shape[0]} duplicate rows.")
 
-    # For creditcard.csv, V1-V28 are already numerical. Time and Amount are also.
-    # No specific type conversions usually needed.
-    # Check for missing values (typically none in this dataset)
-    if df.isnull().sum().sum() > 0:
-        print("Warning: Missing values found in bank data. This dataset typically has none.")
-        print(df.isnull().sum()[df.isnull().sum() > 0])
-        # Add imputation logic here if necessary for your specific dataset
-        # For typical creditcard.csv, this block won't execute.
 
-    print("Bank data cleaning complete.")
+    print("--- Bank Data Cleaning Complete ---")
     return df
 
 if __name__ == '__main__':
-    # Example usage (for testing this module directly)
-    # This block will only run if data_cleaning.py is executed directly
-    # python src/data_cleaning.py
+    print("Testing data_cleaning.py")
 
-    print("--- Testing data_cleaning.py ---")
-
-    # Create dummy dataframes for testing
-    ecommerce_data = {
-        'user_id': [1, 1, 2, 3, 4, 4],
-        'signup_time': ['2023-01-01 10:00:00', '2023-01-01 10:00:00', '2023-01-02 11:00:00', '2023-01-03 12:00:00', '2023-01-04 13:00:00', '2023-01-04 13:00:00'],
-        'purchase_time': ['2023-01-01 10:30:00', '2023-01-01 10:30:00', '2023-01-02 11:30:00', '2023-01-03 12:30:00', '2023-01-04 13:30:00', '2023-01-04 13:30:00'],
-        'purchase_value': [50, 50, 100, 20, 75, 75],
-        'device_id': ['A', 'A', 'B', 'C', 'D', 'D'],
-        'source': ['SEO', 'SEO', 'Ads', 'Direct', 'SEO', 'SEO'],
-        'browser': ['Chrome', 'Chrome', 'Safari', 'Firefox', 'Edge', 'Edge'],
-        'sex': ['M', 'M', 'F', 'M', 'F', 'F'],
-        'age': [30, 30, 25, 40, 35, 35],
-        'ip_address': ['192.168.1.1', '192.168.1.1', '192.168.1.2', '192.168.1.3', '192.168.1.4', '192.168.1.4'],
-        'class': [0, 0, 1, 0, 0, 0]
+    # Test E-commerce cleaning
+    ecommerce_test_data = {
+        'event_timestamp': ['2023-01-01 10:00:00', '2023-01-01 10:30:00', 'invalid_date', '2023-01-02 15:00:00'],
+        'event_type': ['view', 'purchase', 'view', 'purchase'],
+        'product_id': [1, 2, 1, 3],
+        'category_id': [10, 10, 20, 20],
+        'brand': ['brandA', np.nan, 'brandA', 'brandC'],
+        'price': [10.0, np.nan, 15.0, 25.0],
+        'user_id': [101, 101, 102, 102]
     }
-    df_eco_test = pd.DataFrame(ecommerce_data)
-    print("\nOriginal E-commerce Test Data:")
-    print(df_eco_test)
-    print("\nInfo before cleaning:")
-    df_eco_test.info()
+    df_ecommerce_test = pd.DataFrame(ecommerce_test_data)
+    print("\nOriginal E-commerce test data:")
+    print(df_ecommerce_test)
+    df_ecommerce_cleaned = clean_ecommerce_data(df_ecommerce_test.copy())
+    print("\nCleaned E-commerce test data head:")
+    print(df_ecommerce_cleaned.head())
+    print("Missing values after cleaning (E-commerce):")
+    print(df_ecommerce_cleaned.isnull().sum())
 
-    df_eco_cleaned = clean_ecommerce_data(df_eco_test.copy())
-    print("\nCleaned E-commerce Test Data:")
-    print(df_eco_cleaned)
-    print("\nInfo after cleaning:")
-    df_eco_cleaned.info()
-
-    bank_data = {
-        'Time': [0, 1, 2, 3, 4, 4],
-        'V1': [1, 2, 3, 4, 5, 5],
-        'Amount': [10, 20, 30, 40, 50, 50],
-        'Class': [0, 0, 1, 0, 0, 0]
+    # Test Bank cleaning
+    bank_test_data = {
+        'Time': [0.0, 1.0, 2.0, np.nan],
+        'V1': [0.1, 0.2, 0.3, 0.4],
+        'Amount': [10.0, 20.0, np.nan, 40.0],
+        'Class': [0, 0, 1, 0]
     }
-    df_bank_test = pd.DataFrame(bank_data)
-    print("\nOriginal Bank Test Data:")
+    df_bank_test = pd.DataFrame(bank_test_data)
+    print("\nOriginal Bank test data:")
     print(df_bank_test)
-    print("\nInfo before cleaning:")
-    df_bank_test.info()
-
     df_bank_cleaned = clean_bank_data(df_bank_test.copy())
-    print("\nCleaned Bank Test Data:")
-    print(df_bank_cleaned)
-    print("\nInfo after cleaning:")
-    df_bank_cleaned.info()
+    print("\nCleaned Bank test data head:")
+    print(df_bank_cleaned.head())
+    print("Missing values after cleaning (Bank):")
+    print(df_bank_cleaned.isnull().sum())
