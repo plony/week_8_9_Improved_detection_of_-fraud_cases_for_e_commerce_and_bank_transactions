@@ -2,140 +2,154 @@
 
 import pandas as pd
 import numpy as np
+from bisect import bisect_left # Import bisect_left
 
-def create_ecommerce_features(df):
+# Helper function to convert IP address string to integer
+def ip_to_int(ip_str):
+    if pd.isna(ip_str):
+        return np.nan
+    try:
+        parts = list(map(int, ip_str.split('.')))
+        return parts[0] * 2**24 + parts[1] * 2**16 + parts[2] * 2**8 + parts[3]
+    except Exception:
+        # Handle cases where IP string is malformed
+        return np.nan
+
+def create_ecommerce_features(df: pd.DataFrame, ip_to_country_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Performs feature engineering for the e-commerce transaction dataset.
+    Creates and engineers features for the e-commerce transaction data.
 
     Args:
-        df (pd.DataFrame): The input e-commerce DataFrame.
-            Expected to have 'event_timestamp' as datetime.
+        df (pd.DataFrame): The cleaned e-commerce transaction DataFrame.
+                           Expected columns: signup_time, purchase_time, purchase_value,
+                           device_id, source, browser, sex, age, ip_address, class.
+        ip_to_country_df (pd.DataFrame): DataFrame mapping IP address ranges to countries.
+                                       Expected columns: lower_bound_ip_address,
+                                       upper_bound_ip_address, country.
 
     Returns:
-        pd.DataFrame: The DataFrame with new engineered features.
+        pd.DataFrame: DataFrame with engineered features.
     """
     print("--- Starting Feature Engineering for E-commerce Data ---")
 
-    # Time-based Features (ensure 'event_timestamp' is datetime)
-    if not pd.api.types.is_datetime64_any_dtype(df['event_timestamp']):
-        df['event_timestamp'] = pd.to_datetime(df['event_timestamp'], errors='coerce')
-        df.dropna(subset=['event_timestamp'], inplace=True) # Drop rows where conversion failed
+    # 1. Time-based Features
+    if 'purchase_time' in df.columns and 'signup_time' in df.columns:
+        # Ensure they are datetime objects (already done in cleaning, but good to be safe)
+        df['purchase_time'] = pd.to_datetime(df['purchase_time'], errors='coerce')
+        df['signup_time'] = pd.to_datetime(df['signup_time'], errors='coerce')
 
-    df['hour_of_day'] = df['event_timestamp'].dt.hour.astype('category')
-    df['day_of_week'] = df['event_timestamp'].dt.dayofweek.astype('category') # Monday=0, Sunday=6
-    df['month'] = df['event_timestamp'].dt.month.astype('category')
-    df['day_of_month'] = df['event_timestamp'].dt.day.astype('category')
-
-    # Convert original `user_id`, `product_id`, etc., to category for potential one-hot encoding
-    df['user_id'] = df['user_id'].astype('category')
-    df['product_id'] = df['product_id'].astype('category')
-    df['category_id'] = df['category_id'].astype('category')
-    df['brand'] = df['brand'].astype('category')
-    df['event_type'] = df['event_type'].astype('category')
+        # Time difference between signup and purchase
+        df['time_to_purchase'] = (df['purchase_time'] - df['signup_time']).dt.total_seconds()
+        # Handle cases where signup_time is after purchase_time (e.g., set to 0 or NaN)
+        df['time_to_purchase'] = df['time_to_purchase'].apply(lambda x: max(x, 0) if not pd.isna(x) else np.nan)
 
 
-    # Transaction-based Features
-    # Sort by user and time for sequential features
-    df = df.sort_values(by=['user_id', 'event_timestamp'])
+        # Hour of the day for purchase
+        df['purchase_hour'] = df['purchase_time'].dt.hour
+        # Day of the week for purchase (0=Monday, 6=Sunday)
+        df['purchase_day_of_week'] = df['purchase_time'].dt.dayofweek
 
-    # Time since last transaction for each user (in seconds)
-    df['time_since_last_transaction'] = df.groupby('user_id')['event_timestamp'].diff().dt.total_seconds().fillna(0)
-
-    # Count of transactions per user
-    df['user_transaction_count'] = df.groupby('user_id').cumcount() + 1
-
-    # Average price per user (cumulative average up to current transaction)
-    df['user_avg_price'] = df.groupby('user_id')['price'].expanding().mean().reset_index(level=0, drop=True)
-    df['user_avg_price'].fillna(df['price'], inplace=True) # For the first transaction
-
-    # Indicate if it's the first transaction for a user in the dataset
-    df['is_first_transaction'] = (df['user_transaction_count'] == 1).astype(int)
+        print("Engineered time-based features: time_to_purchase, purchase_hour, purchase_day_of_week.")
+    else:
+        print("Warning: 'purchase_time' or 'signup_time' not found for time-based features.")
 
 
-    print("--- E-commerce Feature Engineering Complete ---")
+    # 2. IP Address to Country Mapping (Geolocation Feature)
+    print("Mapping IP addresses to countries...")
+    if 'ip_address' in df.columns and 'lower_bound_ip_address' in ip_to_country_df.columns:
+        # Convert IP address strings to integers for both dataframes
+        df['ip_address_int'] = df['ip_address'].apply(ip_to_int)
+        ip_to_country_df['lower_bound_ip_int'] = ip_to_country_df['lower_bound_ip_address'].apply(ip_to_int)
+        ip_to_country_df['upper_bound_ip_int'] = ip_to_country_df['upper_bound_ip_address'].apply(ip_to_int)
+
+        # Sort IP to country mapping by lower bound for efficient bisect_left lookup
+        ip_to_country_df_sorted = ip_to_country_df.sort_values('lower_bound_ip_int').reset_index(drop=True)
+
+        lower_bounds = ip_to_country_df_sorted['lower_bound_ip_int'].tolist()
+        upper_bounds = ip_to_country_df_sorted['upper_bound_ip_int'].tolist()
+        countries = ip_to_country_df_sorted['country'].tolist()
+
+        def get_country_from_ip(ip_int):
+            if pd.isna(ip_int):
+                return 'Unknown' # Handle NaN IPs by assigning 'Unknown' country
+            
+            # Find the index where ip_int would be inserted to maintain order
+            idx = bisect_left(lower_bounds, ip_int)
+
+            # Check the range just before or at idx
+            # If idx is 0, it means ip_int is smaller than all lower bounds.
+            # Otherwise, check the previous range for a match.
+            if idx == len(lower_bounds) or ip_int < lower_bounds[idx]:
+                idx -= 1 # Look at the previous range
+
+            if idx >= 0 and ip_int >= lower_bounds[idx] and ip_int <= upper_bounds[idx]:
+                return countries[idx]
+            return 'Unknown' # Default for IPs not found in any range
+
+        df['country'] = df['ip_address_int'].apply(get_country_from_ip)
+        df['country'] = df['country'].astype('category') # Convert to category
+        print("Successfully mapped IP addresses to 'country' feature using bisect_left.")
+    else:
+        print("Warning: 'ip_address' not found in e-commerce data or IP to Country mapping data invalid. Assigning 'Unknown' country.")
+        df['country'] = 'Unknown' # Add a default country column to avoid downstream errors
+        df['country'] = df['country'].astype('category')
+
+
+    # 3. Other potential features from Fraud_Data.csv
+    # Frequency encoding for high cardinality categorical features like user_id, device_id
+    if 'user_id' in df.columns:
+        df['user_id_count'] = df.groupby('user_id')['user_id'].transform('count')
+        print("Engineered 'user_id_count' feature.")
+    if 'device_id' in df.columns:
+        df['device_id_count'] = df.groupby('device_id')['device_id'].transform('count')
+        print("Engineered 'device_id_count' feature.")
+
+    # 4. Drop original columns that are now redundant or not features for the model
+    columns_to_drop = [
+        'signup_time',          # Replaced by time_to_purchase, purchase_hour, purchase_day_of_week
+        'purchase_time',        # Replaced by time_to_purchase, purchase_hour, purchase_day_of_week
+        'ip_address',           # Replaced by 'country'
+        'ip_address_int',       # Helper column for IP lookup
+        # 'user_id',            # Keep if needed for other analysis, or drop if user_id_count is sufficient
+        # 'device_id',          # Keep if needed for other analysis, or drop if device_id_count is sufficient
+    ]
+    # Also drop the temporary IP range columns from ip_to_country_df that were merged
+    # (these are not in df, but good to be aware they are helper columns)
+    # 'lower_bound_ip_int', 'upper_bound_ip_int'
+
+    df.drop(columns=[col for col in columns_to_drop if col in df.columns], inplace=True, errors='ignore')
+    print(f"Dropped redundant columns from e-commerce data: {[col for col in columns_to_drop if col in df.columns]}")
+
+
+    print("--- E-commerce Data Feature Engineering Complete ---")
     return df
 
-def create_bank_features(df):
+
+def create_bank_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Performs feature engineering for the bank transaction (credit card fraud) dataset.
+    Creates and engineers features for the bank transaction data.
 
     Args:
-        df (pd.DataFrame): The input bank transaction DataFrame.
-        This DF is expected to have 'Time' and 'Amount' features along with V1-V28 PCA features.
+        df (pd.DataFrame): The cleaned bank transaction DataFrame.
+                           Expected columns: Time, V1-V28, Amount, Class.
 
     Returns:
-        pd.DataFrame: The DataFrame with new engineered features.
+        pd.DataFrame: DataFrame with engineered features.
     """
     print("--- Starting Feature Engineering for Bank Data ---")
 
-    # The 'Time' column in this dataset is seconds elapsed since the first transaction.
-    # We will derive cyclical time features from it.
+    # For `creditcard.csv`, 'Time' is the elapsed time in seconds from the first transaction.
+    # It's usually kept as a direct numerical feature.
+    # V1-V28 are already PCA transformed features and are kept as is.
+    # 'Amount' is also kept as a direct numerical feature.
+    # No further feature engineering is typically done on these due to their anonymized nature
+    # or the dataset's specific structure.
 
-    # Calculate hour of day (0-23)
-    # Convert seconds to hours, take integer part (floor), then modulo 24
-    df['hour_of_day'] = (df['Time'] / 3600).astype(int) % 24
-    df['hour_of_day'] = df['hour_of_day'].astype('category') # Convert to category type
+    # Example of a simple derived feature if useful, e.g., amount per time unit (though 'Time' is elapsed time)
+    # df['amount_per_time'] = df['Amount'] / (df['Time'] + 1e-6) # Adding small epsilon to avoid division by zero
+    # print("Engineered 'amount_per_time' feature.")
 
+    print("No additional features engineered for bank data (V1-V28 are PCA, Time and Amount are kept).")
 
-    # Calculate day of week (0-6, assuming dataset starts on day 0)
-    # Convert seconds to days, take integer part (floor), then modulo 7
-    df['day_of_week'] = (df['Time'] / (3600 * 24)).astype(int) % 7
-    df['day_of_week'] = df['day_of_week'].astype('category') # Convert to category type
-
-
-    # Interaction features: Amount related to time
-    # This can be tricky due to the nature of the 'Time' column in this dataset.
-    # 'Amount_per_hour' or 'Amount_per_day' might be less intuitive since 'Time' is continuous seconds.
-    # Instead, consider ratios of Amount to other features (e.g., mean, max) or transformations.
-    # For now, let's keep it simple with just hour_of_day and day_of_week to avoid high cardinality issues.
-    # You could add things like:
-    # df['Amount_log'] = np.log1p(df['Amount']) # Log transform for skewed Amount
-    # df['Amount_per_V_feature'] = df['Amount'] / (df['V_feature'].abs() + 1e-6) # Example: amount / V1.abs()
-
-    print("--- Bank Feature Engineering Complete ---")
+    print("--- Bank Data Feature Engineering Complete ---")
     return df
-
-if __name__ == '__main__':
-    # This block is for testing the functions directly
-    print("Running feature_engineering.py as a standalone script for testing.")
-
-    # --- Test E-commerce Features ---
-    print("\nTesting E-commerce Feature Engineering...")
-    ecommerce_data = {
-        'event_timestamp': ['2023-01-01 10:00:00', '2023-01-01 10:30:00', '2023-01-02 15:00:00', '2023-01-02 15:10:00', '2023-01-01 11:00:00'],
-        'event_type': ['view', 'purchase', 'view', 'purchase', 'view'],
-        'product_id': [1, 2, 1, 3, 4],
-        'category_id': [10, 10, 20, 20, 10],
-        'brand': ['brandA', 'brandB', 'brandA', 'brandC', 'brandA'],
-        'price': [10.0, 20.0, 15.0, 25.0, 12.0],
-        'user_id': [101, 101, 102, 102, 101]
-    }
-    df_ecommerce_test = pd.DataFrame(ecommerce_data)
-    df_ecommerce_test_engineered = create_ecommerce_features(df_ecommerce_test.copy())
-    print(df_ecommerce_test_engineered.head(5))
-    print("\nE-commerce Feature Dtypes:")
-    print(df_ecommerce_test_engineered[['hour_of_day', 'day_of_week', 'month', 'day_of_month',
-                                       'user_id', 'product_id', 'category_id', 'brand', 'event_type',
-                                       'time_since_last_transaction', 'user_transaction_count', 'user_avg_price', 'is_first_transaction']].dtypes)
-    print("\nE-commerce hour_of_day unique values:", df_ecommerce_test_engineered['hour_of_day'].nunique())
-    print("E-commerce day_of_week unique values:", df_ecommerce_test_engineered['day_of_week'].nunique())
-
-
-    # --- Test Bank Features ---
-    print("\nTesting Bank Feature Engineering...")
-    # Create a dummy bank dataset mimicking the structure of creditcard.csv
-    bank_data = {
-        'Time': [0.0, 1.0, 3600.0, 3601.0, 86399.0, 86400.0, 172800.0, 172801.0],
-        'V1': np.random.rand(8), 'V2': np.random.rand(8), 'V3': np.random.rand(8),
-        'Amount': [10.0, 20.0, 15.0, 25.0, 30.0, 50.0, 100.0, 120.0],
-        'Class': [0, 0, 0, 0, 0, 1, 0, 0]
-    }
-    df_bank_test = pd.DataFrame(bank_data)
-    df_bank_test_engineered = create_bank_features(df_bank_test.copy())
-    print(df_bank_test_engineered.head(8)) # Print all 8 rows to see changes
-    print("\nBank Feature Dtypes:")
-    print(df_bank_test_engineered[['hour_of_day', 'day_of_week']].dtypes)
-    print("\nBank hour_of_day unique values:", df_bank_test_engineered['hour_of_day'].nunique())
-    print("Bank day_of_week unique values:", df_bank_test_engineered['day_of_week'].nunique())
-    print("\nBank hour_of_day values:", df_bank_test_engineered['hour_of_day'].unique())
-    print("Bank day_of_week values:", df_bank_test_engineered['day_of_week'].unique())
